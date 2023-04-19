@@ -25,7 +25,7 @@ EXPORTER_BASIC_AUTH = getenv("SENTRY_EXPORTER_BASIC_AUTH") or "False"
 EXPORTER_BASIC_AUTH_USER = getenv("SENTRY_EXPORTER_BASIC_AUTH_USER") or "prometheus"
 EXPORTER_BASIC_AUTH_PASS = getenv("SENTRY_EXPORTER_BASIC_AUTH_PASS") or "prometheus"
 LOG_LEVEL = getenv("LOG_LEVEL", "INFO")
-ENVS_SLUG = getenv("SENTRY_EXPORTER_ENVS") or "prod"
+ENVS_SLUG = getenv("SENTRY_EXPORTER_ENVS") or "production"
 
 log = logging.getLogger("exporter")
 gunicorn_error_logger = logging.getLogger("gunicorn.error")
@@ -72,6 +72,7 @@ def get_metric_config():
     scrape_issue_metrics = getenv("SENTRY_SCRAPE_ISSUE_METRICS") or "True"
     scrape_events_metrics = getenv("SENTRY_SCRAPE_EVENT_METRICS") or "True"
     scrape_rate_limit_metrics = getenv("SENTRY_SCRAPE_RATE_LIMIT_METRICS") or "False"
+    scrape_performance_metrics = getenv("SENTRY_SCRAPE_PERFORMANCE_METRICS") or "False"
     default_for_time_metrics = "True" if scrape_issue_metrics == "True" else "False"
     get_1h_metrics = getenv("SENTRY_ISSUES_1H") or default_for_time_metrics
     get_24h_metrics = getenv("SENTRY_ISSUES_24H") or default_for_time_metrics
@@ -80,6 +81,7 @@ def get_metric_config():
         scrape_issue_metrics,
         scrape_events_metrics,
         scrape_rate_limit_metrics,
+        scrape_performance_metrics,
         get_1h_metrics,
         get_24h_metrics,
         get_14d_metrics,
