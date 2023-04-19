@@ -4,6 +4,8 @@ from os import getenv
 from retry import retry
 import requests
 
+REQUEST_SSL_VERIFY = getenv("REQUEST_SSL_VERIFY", "True") == "True"
+
 retry_settings = {
     "tries": int(getenv("SENTRY_RETRY_TRIES", "3")),
     "delay": float(getenv("SENTRY_RETRY_DELAY", "1")),
@@ -39,7 +41,7 @@ class SentryAPI(object):
     @retry(requests.exceptions.HTTPError, **retry_settings)
     def __get(self, url):
         HEADERS = {"Authorization": "Bearer " + self.__token}
-        response = self.__session.get(self.base_url + url, headers=HEADERS)
+        response = self.__session.get(self.base_url + url, headers=HEADERS, verify=REQUEST_SSL_VERIFY)
         response.raise_for_status()
         return response
 
@@ -294,6 +296,57 @@ class SentryAPI(object):
             return events
         else:
             resp = self.__get(events_url)
+            return {"all": resp.json()}
+
+    """
+    Transactions metrics
+    """
+    def transactions(
+        self,
+        org_slug,
+        project,
+        environment=None,
+        age="7d",
+        query="event.type:transaction",
+        fields=[],
+        sort=[],
+    ):
+        """Return a list of performance events bound to a project.
+
+        Retrieves transactions events for a defined period.
+
+        Args:
+            org_slug: An organization slug string name.
+            project: dict instance of a project.
+            environments: Optional;
+                A sequence, of strings representing the environment names.
+
+        Returns:
+            A list mapping with all project's corresponding performance events.
+
+        Raises:
+            TypeError: An error occurred if the project instance isn't a valid dict
+        """
+
+        if not isinstance(project, dict):
+            raise TypeError("project param isn't a dictionary")
+        transactions_url = "organizations/{org}/events/?project={proj_id}&query={query}&statsPeriod={age}{sort}{fields}".format(
+            org=org_slug,
+            proj_id=project.get("id"),
+            age=age,
+            query=requests.utils.quote(query),
+            sort="".join(map(lambda x: "&sort={}".format(requests.utils.quote(x)), sort)),
+            fields="".join(map(lambda x: "&field={}".format(requests.utils.quote(x)), fields)),
+        )
+
+        if environment:
+            events = {}
+            transactions_url = transactions_url + "&environment={env}".format(env=environment)
+            resp = self.__get(transactions_url)
+            events[environment] = resp.json()
+            return events
+        else:
+            resp = self.__get(transactions_url)
             return {"all": resp.json()}
 
     def issue_events(self, issue_id, environment=None):

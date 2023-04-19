@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timedelta
 from uuid import uuid4
+from os import getenv
 
 from prometheus_client.core import (
     REGISTRY,
@@ -58,9 +59,10 @@ class SentryCollector(object):
         self.issue_metrics = metric_scraping_config[0]
         self.events_metrics = metric_scraping_config[1]
         self.rate_limit_metrics = metric_scraping_config[2]
-        self.get_1h_metrics = metric_scraping_config[3]
-        self.get_24h_metrics = metric_scraping_config[4]
-        self.get_14d_metrics = metric_scraping_config[5]
+        self.performance_metrics = metric_scraping_config[3]
+        self.get_1h_metrics = metric_scraping_config[4]
+        self.get_24h_metrics = metric_scraping_config[5]
+        self.get_14d_metrics = metric_scraping_config[6]
         self.sentry_envs = sentry_envs
 
     def __build_sentry_data_from_api(self):
@@ -103,6 +105,7 @@ class SentryCollector(object):
         projects_slug = []
         projects_envs = {}
         projects = []
+        projects_settings = {}
         self.org = self.__sentry_api.get_org(self.sentry_org_slug)
         log.info("metadata: sentry organization: {org}".format(org=self.org.get("slug")))
 
@@ -137,8 +140,38 @@ class SentryCollector(object):
                 "metadata: projects loaded from API: {num_proj}".format(num_proj=len(projects))
             )
 
+        # Integration of @gyrter performance events fork
+        # ref: https://github.com/gyrter/sentry-prometheus-exporter/tree/events_v2_metrics
+        """
+        Create settings for project performance metrics
+        """
+        for project in projects:
+            projects_settings[project.get("slug")] = {}
+            projects_settings[project.get("slug")]["query"] = (
+                getenv("SENTRY_SCRAPE_PERFORMANCE_METRICS_{}_QUERY".format(project.get("slug")))
+                or "transaction.duration:<15m event.type:transaction transaction.op:pageload"
+            )
+            projects_settings[project.get("slug")]["fields"] = (
+                getenv("SENTRY_SCRAPE_PERFORMANCE_METRICS_{}_FIELDS".format(project.get("slug")))
+                or "tpm(),p50(),p95(),p75(measurements.fp),p75(measurements.fcp),p75(measurements.lcp),p75(measurements.fid),p75(measurements.cls),p75(measurements.ttfb),failure_rate(),apdex(),count_unique(user),count_miserable(user),user_misery()"
+            )
+            projects_settings[project.get("slug")]["sort"] = (
+                getenv("SENTRY_SCRAPE_PERFORMANCE_METRICS_{}_SORT".format(project.get("slug")))
+                or "-team_key_transaction,-tpm"
+            )
+            projects_settings[project.get("slug")]["fields"] = projects_settings[
+                project.get("slug")
+            ]["fields"].split(",")
+            projects_settings[project.get("slug")]["sort"] = projects_settings[
+                project.get("slug")
+            ]["sort"].split(",")
+            projects_settings[project.get("slug")]["period"] = (
+                getenv("SENTRY_SCRAPE_PERFORMANCE_METRICS_{}_PERIOD".format(project.get("slug")))
+                or "24h"
+            )
+
         if self.sentry_envs != "" :
-            projects_envs[project.get("slug")] = self.sentry_envs.split(",") 
+            projects_envs[project.get("slug")] = self.sentry_envs.split(",")
             log.info("envs has been overriden by : {envs}".format(envs=projects_envs[project.get("slug")]))
 
         log.debug("metadata: building projects metadata structure")
@@ -148,6 +181,7 @@ class SentryCollector(object):
                 "projects": projects,
                 "projects_slug": projects_slug,
                 "projects_envs": projects_envs,
+                "project_settings": projects_settings,
             }
         }
         if self.issue_metrics == "True":
@@ -566,3 +600,66 @@ class SentryCollector(object):
                 )
 
             yield project_rate_metrics
+
+        if self.performance_metrics == "True":
+            log.info("collector: loading performance metrics")
+            for project in __metadata.get("projects"):
+                envs = __metadata.get("projects_envs").get(project.get("slug"))
+                settings = __metadata.get("project_settings").get(project.get("slug"))
+                metrics = {}
+                for field in settings.get("fields"):
+                    fieldName = (
+                        field.replace("(", "_").replace(")", "_").replace(".", "_").strip("_")
+                    )
+                    log.debug(
+                        "collector: creating performance metrics {} for {}".format(
+                            fieldName, project.get("slug")
+                        )
+                    )
+                    metrics[fieldName] = GaugeMetricFamily(
+                        "sentry_performance_events_{}".format(fieldName),
+                        "Performance metrics for a project - {}".format(fieldName),
+                        labels=["project_slug", "environment", "transaction"],
+                    )
+                envs.append(None)
+                for env in envs:
+                    """
+                    Creating URT  with request. Add default fields: team_key_transaction, transaction for navigations
+                    """
+                    transaction_fields = ["team_key_transaction", "transaction", "transaction.op", "transaction.duration"]
+                    performance_events = self.__sentry_api.transactions(
+                        self.org.get("slug"),
+                        project,
+                        env,
+                        age=settings.get("period"),
+                        query=settings.get("query"),
+                        fields=settings.get("fields") + transaction_fields,
+                        sort=settings.get("sort"),
+                    )
+                    if not env:
+                        env = "all"
+                    log.debug(
+                        "collector: loading performance metrics - project: {proj} env: {env}".format(
+                            proj=project.get("slug"), env=env
+                        )
+                    )
+                    for performance_event in performance_events[env]["data"]:
+                        for metric in metrics.keys():
+                            log.debug(
+                                "collector: populating performance metrics {} for {} env {}".format(
+                                    metric, project.get("slug"), env
+                                )
+                            )
+                            data = 0.0
+                            if performance_event[metric]:
+                                data = performance_event[metric]
+                            metrics[metric].add_metric(
+                                [
+                                    str(project.get("slug")),
+                                    env,
+                                    performance_event["transaction"],
+                                ],
+                                data,
+                            )
+            for field in metrics.keys():
+                yield metrics[field]
